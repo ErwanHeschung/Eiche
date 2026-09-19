@@ -1,0 +1,92 @@
+(* Eiche DSL grammar — M0 draft.
+   Reflects the settled decisions in .context/CLAUDE.md (2026-09-19):
+   models only (no routes), `view` for create/update contexts, strict
+   unknown-fields with `...` opt-out, no discriminated unions yet,
+   `field?: type = value` defaults on optional fields only.
+
+   Notation: EBNF, '|' alternation, '[]' optional, '{}' zero-or-more,
+   terminals in "quotes". Whitespace and comments are not significant
+   except as token separators. *)
+
+File            = { ImportDecl } , { TopLevelDecl } ;
+
+ImportDecl      = "import" , StringLit , [ ";" ] ;
+
+TopLevelDecl    = CapabilityDecl
+                | EnumDecl
+                | ModelDecl
+                | ViewDecl ;
+
+CapabilityDecl  = "capability" , Ident , "from" , StringLit ;
+
+EnumDecl        = "enum" , Ident , "{" , EnumMember , { "," , EnumMember } , [ "," ] , "}" ;
+EnumMember      = Ident ;
+
+ModelDecl       = "model" , Ident , "{" , { ModelMember } , "}" ;
+
+ModelMember     = FieldDecl
+                | RuleDecl
+                | UnknownFieldsMarker ;
+
+UnknownFieldsMarker = "..." ;   (* opts this model into tolerating unknown JSON fields; absent = strict *)
+
+FieldDecl       = Ident , [ "?" ] , ":" , TypeExpr , { Annotation } , [ "=" , Literal ] ;
+                  (* "=" default is only valid when "?" (optional) is present — enforced by the
+                     type checker, not the grammar, so the parser can give a precise diagnostic. *)
+
+RuleDecl        = "@rule" , "(" , Expr , "," , StringLit , ")" , [ "on" , Ident ] ;
+                  (* default error-attachment field, when "on" is omitted, is the first field
+                     referenced by Expr — resolved by the type checker, not the parser. *)
+
+Annotation      = "@" , Ident , [ "(" , [ AnnotationArgs ] , ")" ] ;
+AnnotationArgs  = AnnotationArg , { "," , AnnotationArg } ;
+AnnotationArg   = Expr | Ident ;   (* bare Ident covers e.g. @after(today); reserved-word handling
+                                       for tokens like `email` in @format(email) is a lexer concern,
+                                       see grammar/notes.md *)
+
+ViewDecl        = "view" , Ident , "=" , ViewExpr ;
+ViewExpr        = "partial" , Ident                          (* view X = partial Base *)
+                | Ident , [ "{" , FieldList , "}" ]           (* view X = Base | view X = Base { a, b } *)
+                ;
+FieldList       = Ident , { "," , Ident } , [ "," ] ;
+
+TypeExpr        = ScalarType , [ "[" , { Annotation } , "]" ] (* T[]  or  T[@minLength(2) ...] *)
+                | ScalarType ;
+                  (* Element-level constraints live inside the brackets rather than as a nested
+                     @each(...) annotation — settled 2026-09-19, see .context/CLAUDE.md. *)
+ScalarType      = "string" | "int" | "decimal" | "bool" | "date" | "datetime"
+                | "json" , [ JsonShape ]
+                | Ident                                       (* reference to enum/model/view *)
+                ;
+JsonShape       = "{" , { FieldDecl } , [ "..." ] , "}" ;
+
+(* ---- Expression sub-language: comparisons, boolean ops, field refs,
+        null checks, `implies`, and `::` capability calls. No
+        user-defined functions, no variable binding, no recursion. ---- *)
+
+Expr            = ImpliesExpr ;
+ImpliesExpr     = OrExpr , [ "implies" , ImpliesExpr ] ;      (* right-associative *)
+OrExpr          = AndExpr , { "||" , AndExpr } ;
+AndExpr         = NotExpr , { "&&" , NotExpr } ;
+NotExpr         = [ "!" ] , CompareExpr ;
+CompareExpr     = AddExpr , [ CompareOp , AddExpr ] ;
+CompareOp       = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+AddExpr         = MulExpr , { ( "+" | "-" ) , MulExpr } ;
+MulExpr         = UnaryExpr , { ( "*" | "/" | "%" ) , UnaryExpr } ;
+UnaryExpr       = [ "-" ] , Postfix ;
+Postfix         = Primary , { CapabilityCall | FieldAccess | NullCheck } ;
+CapabilityCall  = "::" , Ident , "(" , [ ArgList ] , ")" ;
+FieldAccess     = "." , Ident ;
+NullCheck       = "." , "isNull" | "." , "isPresent" ;         (* sugar; may collapse to `== null` at parse time *)
+ArgList         = Expr , { "," , Expr } ;
+Primary         = Literal | Ident | "(" , Expr , ")" ;
+
+Literal         = IntLit | DecimalLit | StringLit | BoolLit | "null" ;
+
+(* ---- Lexical ---- *)
+Ident           = letter , { letter | digit | "_" } ;
+IntLit          = digit , { digit } ;
+DecimalLit      = digit , { digit } , "." , digit , { digit } ;
+StringLit       = '"' , { any_char_except('"') | EscapeSeq } , '"' ;
+BoolLit         = "true" | "false" ;
+Comment         = "//" , { any_char_except(newline) } ;        (* line comments only, per brief *)

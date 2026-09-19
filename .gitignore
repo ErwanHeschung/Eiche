@@ -1,0 +1,38 @@
+# Go
+/eichec
+*.test
+*.out
+
+# Generated output — never committed, per .context/CLAUDE.md
+**/target/generated-sources/
+**/generated/
+
+# Java / Maven
+target/
+*.class
+*.jar
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# WASM build artifacts (source Go for capabilities is committed, the
+# compiled .wasm is a build output)
+*.wasm
+
+# M-1 spike scratch work — not part of the tracked project yet
+/spike/
+
+# Planning/reference docs — not part of the tracked project yet
+/.context/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Local env / secrets
+.env
+.env.local
