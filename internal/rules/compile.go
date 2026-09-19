@@ -16,32 +16,50 @@ import (
 // ProgramABI is the bytecode ABI version this compiler emits.
 const ProgramABI = 1
 
-// Compile lowers one checked model's @rule list into a bytecode.Program.
-// Callers must have already run core.CheckTypes, core.CheckExpressions,
-// and core.CheckNaming on the enclosing Program and confirmed they're
-// diagnostic-free — Compile does not re-validate field references or
-// capability calls.
+// Compile lowers one checked model's field constraints and @rule list
+// into a bytecode.Program. Callers must have already run
+// core.CheckTypes, core.CheckExpressions, and core.CheckNaming on the
+// enclosing Program and confirmed they're diagnostic-free — Compile does
+// not re-validate field references or capability calls.
 //
-// Scope cuts for this first version of the compiler, made explicit rather
-// than silently handled:
-//   - Field-level constraint annotations (@minLength, @min, @range, ...)
-//     are not compiled into checks yet — only explicit @rule blocks are.
-//     Both are meant to go through the same engine per the brief ("no
-//     Bean Validation annotations... everything goes through the WASM
-//     engine"), so this is a real gap, not a permanent design choice —
-//     it needs a registry of built-in annotation semantics, deliberately
-//     deferred to keep this change reviewable.
+// Field constraints (required-presence for non-optional fields, plus
+// @minLength/@maxLength/@min/@max/@range/@minItems/@maxItems) compile
+// first, in field declaration order, ahead of @rule checks — required so
+// the brief's ordering rule ("field constraints run first; any @rule
+// referencing a field that already has an error is skipped") has
+// something to gate against; see bytecode.Check.IsFieldConstraint.
+//
+// Scope cuts for this version of the compiler, made explicit rather than
+// silently handled:
+//   - @format, @after, @before, @each (element-level array constraints),
+//     and any other annotation aren't compiled into checks — they're
+//     silently accepted as no-ops. @format/@after/@before need a
+//     format-string registry and a "now" validation-context parameter
+//     that don't exist yet; @each needs either a VM loop construct or
+//     per-element unrolling, and the array-element story more generally
+//     (OpGetProp on array members) isn't designed yet either.
+//   - Annotation arguments must be integer literals (@min(20000),
+//     @range(10, 48)) — matches every example in the brief's own DSL.
+//     A decimal-literal argument (@min(20000.50)) is rejected.
 //   - SelectorExpr (nested "." access, e.g. into a json-typed field) is
-//     rejected with a compile error. It isn't exercised by any rule in
-//     the brief's own examples, and doing it properly needs a coherent
-//     "dynamic value" design in the VM that hasn't been built.
+//     rejected with a compile error, for the same reason as above: it
+//     isn't exercised by any rule in the brief's own examples, and doing
+//     it properly needs a coherent "dynamic value" design in the VM.
 func Compile(m *core.IRModel) (*bytecode.Program, error) {
 	c := &compiler{fieldIdx: map[string]int{}}
 	for _, f := range m.Fields {
-		c.registerField(f.Name, f.Type.Scalar)
+		c.registerField(f.Name, f.Type.Scalar, f.Type.IsArray)
 	}
 
-	checks := make([]bytecode.Check, 0, len(m.Rules))
+	var checks []bytecode.Check
+	for _, f := range m.Fields {
+		fieldChecks, err := c.compileFieldConstraints(f)
+		if err != nil {
+			return nil, fmt.Errorf("model %s: %w", m.Name, err)
+		}
+		checks = append(checks, fieldChecks...)
+	}
+
 	for _, rule := range m.Rules {
 		code, err := c.compileExpr(rule.Expr)
 		if err != nil {
@@ -65,32 +83,168 @@ func Compile(m *core.IRModel) (*bytecode.Program, error) {
 	}
 
 	return &bytecode.Program{
-		ABI:        ProgramABI,
-		Fields:     c.fields,
-		FieldTypes: c.fieldTypes,
-		Constants:  c.constants,
-		Calls:      c.calls,
-		Checks:     checks,
+		ABI:          ProgramABI,
+		Fields:       c.fields,
+		FieldTypes:   c.fieldTypes,
+		FieldIsArray: c.fieldIsArray,
+		Constants:    c.constants,
+		Calls:        c.calls,
+		Checks:       checks,
 	}, nil
 }
 
 type compiler struct {
-	fields     []string
-	fieldTypes []string
-	fieldIdx   map[string]int
-	constants  []bytecode.Value
-	calls      []bytecode.CapabilityCall
+	fields       []string
+	fieldTypes   []string
+	fieldIsArray []bool
+	fieldIdx     map[string]int
+	constants    []bytecode.Value
+	calls        []bytecode.CapabilityCall
 }
 
-func (c *compiler) registerField(name, scalar string) int {
+func (c *compiler) registerField(name, scalar string, isArray bool) int {
 	if idx, ok := c.fieldIdx[name]; ok {
 		return idx
 	}
 	idx := len(c.fields)
 	c.fields = append(c.fields, name)
 	c.fieldTypes = append(c.fieldTypes, scalar)
+	c.fieldIsArray = append(c.fieldIsArray, isArray)
 	c.fieldIdx[name] = idx
 	return idx
+}
+
+// compileFieldConstraints synthesizes this field's required-presence
+// check (if it isn't declared optional) and every built-in annotation it
+// carries. Unrecognized annotations (@format, @after, ...) are silently
+// skipped — see Compile's doc comment.
+func (c *compiler) compileFieldConstraints(f core.IRField) ([]bytecode.Check, error) {
+	idx := c.fieldIdx[f.Name]
+	var checks []bytecode.Check
+
+	if !f.Optional {
+		checks = append(checks, bytecode.Check{
+			Code:              []bytecode.Instr{{Op: bytecode.OpFieldPresent, Operand: int32(idx)}},
+			On:                f.Name,
+			Message:           "required",
+			IsFieldConstraint: true,
+		})
+	}
+
+	for _, ann := range f.Annotations {
+		check, err := c.compileAnnotation(f.Name, idx, ann)
+		if err != nil {
+			return nil, err
+		}
+		if check != nil {
+			checks = append(checks, *check)
+		}
+	}
+
+	return checks, nil
+}
+
+func (c *compiler) compileAnnotation(fieldName string, idx int, ann core.IRAnnotation) (*bytecode.Check, error) {
+	switch ann.Name {
+	case "minLength", "minItems":
+		return c.compileLengthBound(fieldName, idx, ann, bytecode.OpGte, "min")
+	case "maxLength", "maxItems":
+		return c.compileLengthBound(fieldName, idx, ann, bytecode.OpLte, "max")
+	case "min":
+		return c.compileNumericBound(fieldName, idx, ann, bytecode.OpGte, "min")
+	case "max":
+		return c.compileNumericBound(fieldName, idx, ann, bytecode.OpLte, "max")
+	case "range":
+		return c.compileRange(fieldName, idx, ann)
+	default:
+		// Not a built-in this compiler gives runtime semantics to yet —
+		// left as a no-op rather than an error, since annotations also
+		// serve as codegen/documentation hints independent of validation.
+		return nil, nil
+	}
+}
+
+func (c *compiler) compileLengthBound(fieldName string, idx int, ann core.IRAnnotation, op bytecode.Op, paramKey string) (*bytecode.Check, error) {
+	n, err := intArg(ann.Args, 0)
+	if err != nil {
+		return nil, fmt.Errorf("field %q: @%s: %w", fieldName, ann.Name, err)
+	}
+	constIdx := c.constIndex(bytecode.Value{Kind: bytecode.KindInt, Int: n})
+	return &bytecode.Check{
+		Code: []bytecode.Instr{
+			{Op: bytecode.OpFieldLen, Operand: int32(idx)},
+			{Op: bytecode.OpPushConst, Operand: constIdx},
+			{Op: op},
+		},
+		Fields:            []int{idx},
+		On:                fieldName,
+		Message:           ann.Name,
+		IsFieldConstraint: true,
+		Params:            map[string]string{paramKey: strconv.FormatInt(n, 10)},
+	}, nil
+}
+
+func (c *compiler) compileNumericBound(fieldName string, idx int, ann core.IRAnnotation, op bytecode.Op, paramKey string) (*bytecode.Check, error) {
+	n, err := intArg(ann.Args, 0)
+	if err != nil {
+		return nil, fmt.Errorf("field %q: @%s: %w", fieldName, ann.Name, err)
+	}
+	constIdx := c.constIndex(bytecode.Value{Kind: bytecode.KindInt, Int: n})
+	return &bytecode.Check{
+		Code: []bytecode.Instr{
+			{Op: bytecode.OpPushField, Operand: int32(idx)},
+			{Op: bytecode.OpPushConst, Operand: constIdx},
+			{Op: op},
+		},
+		Fields:            []int{idx},
+		On:                fieldName,
+		Message:           ann.Name,
+		IsFieldConstraint: true,
+		Params:            map[string]string{paramKey: strconv.FormatInt(n, 10)},
+	}, nil
+}
+
+func (c *compiler) compileRange(fieldName string, idx int, ann core.IRAnnotation) (*bytecode.Check, error) {
+	if len(ann.Args) != 2 {
+		return nil, fmt.Errorf("field %q: @range needs exactly 2 arguments, got %d", fieldName, len(ann.Args))
+	}
+	lo, err := intArg(ann.Args, 0)
+	if err != nil {
+		return nil, fmt.Errorf("field %q: @range: %w", fieldName, err)
+	}
+	hi, err := intArg(ann.Args, 1)
+	if err != nil {
+		return nil, fmt.Errorf("field %q: @range: %w", fieldName, err)
+	}
+	loIdx := c.constIndex(bytecode.Value{Kind: bytecode.KindInt, Int: lo})
+	hiIdx := c.constIndex(bytecode.Value{Kind: bytecode.KindInt, Int: hi})
+	return &bytecode.Check{
+		Code: []bytecode.Instr{
+			{Op: bytecode.OpPushField, Operand: int32(idx)},
+			{Op: bytecode.OpPushConst, Operand: loIdx},
+			{Op: bytecode.OpGte},
+			{Op: bytecode.OpPushField, Operand: int32(idx)},
+			{Op: bytecode.OpPushConst, Operand: hiIdx},
+			{Op: bytecode.OpLte},
+			{Op: bytecode.OpAnd},
+		},
+		Fields:            []int{idx},
+		On:                fieldName,
+		Message:           "range",
+		IsFieldConstraint: true,
+		Params:            map[string]string{"min": strconv.FormatInt(lo, 10), "max": strconv.FormatInt(hi, 10)},
+	}, nil
+}
+
+func intArg(args []core.IRExpr, i int) (int64, error) {
+	if i >= len(args) {
+		return 0, fmt.Errorf("missing argument %d", i)
+	}
+	a := args[i]
+	if a.Kind != core.ExprIntLit {
+		return 0, fmt.Errorf("argument %d must be an integer literal, got %s", i, a.Kind)
+	}
+	return strconv.ParseInt(a.Value, 10, 64)
 }
 
 func (c *compiler) constIndex(v bytecode.Value) int32 {

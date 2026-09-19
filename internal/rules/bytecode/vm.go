@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/rivo/uniseg"
 	"github.com/shopspring/decimal"
 )
 
@@ -49,12 +50,13 @@ func ParseInput(data []byte) (map[string]any, error) {
 // field being compared directly against null is deliberately exempt.
 func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]ValidationError, error) {
 	var errs []ValidationError
+	failed := map[int]bool{} // field indices with a reported field-constraint error so far
 
 	for _, check := range prog.Checks {
 		skip := false
 		for _, fieldIdx := range check.Fields {
 			name := prog.Fields[fieldIdx]
-			if isAbsentOrNull(input, name) {
+			if isAbsentOrNull(input, name) || failed[fieldIdx] {
 				skip = true
 				break
 			}
@@ -68,7 +70,12 @@ func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]Val
 			return nil, fmt.Errorf("check %q: %w", check.Message, err)
 		}
 		if !result {
-			errs = append(errs, ValidationError{Path: check.On, Code: check.Message})
+			errs = append(errs, ValidationError{Path: check.On, Code: check.Message, Params: check.Params})
+			if check.IsFieldConstraint {
+				for _, fieldIdx := range check.Fields {
+					failed[fieldIdx] = true
+				}
+			}
 		}
 	}
 
@@ -78,6 +85,34 @@ func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]Val
 func isAbsentOrNull(input map[string]any, name string) bool {
 	v, ok := input[name]
 	return !ok || v == nil
+}
+
+// fieldLength implements OpFieldLen: grapheme-cluster count for a string
+// field, element count for an array field. Grapheme counting lives here —
+// in the one shared engine — specifically so @maxLength can't give three
+// different answers on Java (UTF-16 code units), JS (also UTF-16 code
+// units, but different surrogate-pair handling in edge cases), and Go
+// (bytes), which is exactly the cross-host divergence this architecture
+// exists to prevent.
+func fieldLength(raw any, isArray bool) (int64, error) {
+	if isArray {
+		arr, ok := raw.([]any)
+		if !ok {
+			if raw == nil {
+				return 0, nil
+			}
+			return 0, fmt.Errorf("expected an array, got %T", raw)
+		}
+		return int64(len(arr)), nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		if raw == nil {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("expected a string, got %T", raw)
+	}
+	return int64(uniseg.GraphemeClusterCount(s)), nil
 }
 
 func evalCheck(prog *Program, check Check, input map[string]any, invoker CapabilityInvoker) (bool, error) {
@@ -105,6 +140,18 @@ func evalCheck(prog *Program, check Check, input map[string]any, invoker Capabil
 				return false, fmt.Errorf("field %q: %w", name, err)
 			}
 			push(v)
+
+		case OpFieldLen:
+			name := prog.Fields[instr.Operand]
+			n, err := fieldLength(input[name], prog.FieldIsArray[instr.Operand])
+			if err != nil {
+				return false, fmt.Errorf("field %q: %w", name, err)
+			}
+			push(Value{Kind: KindInt, Int: n})
+
+		case OpFieldPresent:
+			name := prog.Fields[instr.Operand]
+			push(Value{Kind: KindBool, Bool: !isAbsentOrNull(input, name)})
 
 		case OpGetProp:
 			// Nested/selector access isn't compiled yet — internal/rules

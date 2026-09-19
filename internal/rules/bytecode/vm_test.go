@@ -192,3 +192,148 @@ func TestVMAndOrNot(t *testing.T) {
 		}
 	}
 }
+
+func TestOpFieldLenGraphemeAware(t *testing.T) {
+	// "Café🇫🇷" is 5 grapheme clusters but 7 runes / 9 UTF-16 code units —
+	// the exact case that would silently diverge between Go, Java, and JS
+	// if length were computed independently on each host.
+	prog := &Program{
+		Fields:       []string{"name"},
+		FieldTypes:   []string{"string"},
+		FieldIsArray: []bool{false},
+		Checks: []Check{{
+			Code: []Instr{
+				{Op: OpFieldLen, Operand: 0},
+				{Op: OpPushConst, Operand: 0},
+				{Op: OpEq},
+			},
+			On: "name", Message: "len",
+		}},
+		Constants: []Value{{Kind: KindInt, Int: 5}},
+	}
+	errs, err := Eval(prog, map[string]any{"name": "Café🇫🇷"}, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("want grapheme count 5 to match, got errors %+v", errs)
+	}
+}
+
+func TestOpFieldLenArrayElementCount(t *testing.T) {
+	prog := &Program{
+		Fields:       []string{"skills"},
+		FieldTypes:   []string{"string"},
+		FieldIsArray: []bool{true},
+		Checks: []Check{{
+			Code: []Instr{
+				{Op: OpFieldLen, Operand: 0},
+				{Op: OpPushConst, Operand: 0},
+				{Op: OpGte},
+			},
+			On: "skills", Message: "minItems",
+		}},
+		Constants: []Value{{Kind: KindInt, Int: 1}},
+	}
+	input, err := ParseInput([]byte(`{"skills": ["Go", "Java"]}`))
+	if err != nil {
+		t.Fatalf("ParseInput: %v", err)
+	}
+	errs, err := Eval(prog, input, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("want 2 items to satisfy minItems(1), got %+v", errs)
+	}
+
+	empty, _ := ParseInput([]byte(`{"skills": []}`))
+	errs, err = Eval(prog, empty, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("want empty array to fail minItems(1), got %+v", errs)
+	}
+}
+
+func TestOpFieldPresent(t *testing.T) {
+	prog := &Program{
+		Fields: []string{"title"},
+		Checks: []Check{{
+			Code:    []Instr{{Op: OpFieldPresent, Operand: 0}},
+			On:      "title",
+			Message: "required",
+		}},
+	}
+	errs, err := Eval(prog, map[string]any{"title": "hi"}, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("present field should pass: %+v", errs)
+	}
+
+	errs, err = Eval(prog, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 1 || errs[0].Code != "required" {
+		t.Fatalf("absent field should fail required: %+v", errs)
+	}
+
+	errs, err = Eval(prog, map[string]any{"title": nil}, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 1 || errs[0].Code != "required" {
+		t.Fatalf("null field should fail required: %+v", errs)
+	}
+}
+
+// TestFieldConstraintGatesLaterRules is the ordering rule from the brief:
+// "field constraints run first; any @rule referencing a field that
+// already has an error is skipped." A field-constraint failure on
+// salaryMin should suppress a later @rule-style check referencing it,
+// but a later check should NOT be suppressed just because an earlier
+// *non-field-constraint* check (an ordinary @rule) failed.
+func TestFieldConstraintGatesLaterRules(t *testing.T) {
+	prog := &Program{
+		Fields:     []string{"salaryMin", "salaryMax"},
+		FieldTypes: []string{"int", "int"},
+		Constants:  []Value{{Kind: KindInt, Int: 20000}},
+		Checks: []Check{
+			{ // field constraint: salaryMin >= 20000
+				Code: []Instr{
+					{Op: OpPushField, Operand: 0},
+					{Op: OpPushConst, Operand: 0},
+					{Op: OpGte},
+				},
+				Fields:            []int{0},
+				On:                "salaryMin",
+				Message:           "min",
+				IsFieldConstraint: true,
+			},
+			{ // ordinary @rule referencing the now-failed field
+				Code: []Instr{
+					{Op: OpPushField, Operand: 1},
+					{Op: OpPushField, Operand: 0},
+					{Op: OpGte},
+				},
+				Fields:  []int{0, 1},
+				On:      "salaryMax",
+				Message: "salary.range",
+			},
+		},
+	}
+	// salaryMin (10000) fails its own @min(20000) constraint. The
+	// cross-field rule referencing salaryMin should be skipped, not
+	// double-reported, even though it would also fail numerically.
+	errs, err := Eval(prog, map[string]any{"salaryMin": 10000, "salaryMax": 5000}, nil)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(errs) != 1 || errs[0].Code != "min" {
+		t.Fatalf("want only the field-constraint error, got %+v", errs)
+	}
+}

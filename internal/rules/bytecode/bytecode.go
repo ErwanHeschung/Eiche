@@ -12,9 +12,11 @@ package bytecode
 type Op byte
 
 const (
-	OpPushConst Op = iota // operand: index into Program.Constants
-	OpPushField           // operand: index into Program.Fields — reads a top-level field from the input object
-	OpGetProp             // operand: index into Program.Constants (a KindString) — pops a value, pushes its named property
+	OpPushConst    Op = iota // operand: index into Program.Constants
+	OpPushField              // operand: index into Program.Fields — reads a top-level field from the input object
+	OpGetProp                // operand: index into Program.Constants (a KindString) — pops a value, pushes its named property
+	OpFieldLen               // operand: index into Program.Fields — pushes KindInt: grapheme-cluster count for a string field, element count for an array field
+	OpFieldPresent           // operand: index into Program.Fields — pushes KindBool: field exists and is non-null in the input
 	OpEq
 	OpNeq
 	OpLt
@@ -75,11 +77,26 @@ type CapabilityCall struct {
 // every top-level field the expression references, so the VM can apply
 // the frozen null-safety rule: skip this check if any of those fields is
 // null in the input, rather than double-reporting past a missing value.
+//
+// IsFieldConstraint marks a check as derived from a field's own shape —
+// required-presence, @minLength, @min, @range, and so on — as opposed to
+// an explicit @rule. Per the brief, "field constraints run first; any
+// @rule referencing a field that already has an error is skipped": only
+// IsFieldConstraint checks populate the VM's per-field failure set that
+// gates later checks, so one @rule failing doesn't suppress an unrelated
+// @rule that happens to share a field.
+//
+// Params carries the constraint's own literal arguments (e.g. {"min":
+// "3"} for @minLength(3)) for message interpolation — populated for
+// field-constraint checks, empty for @rule (which has no structured
+// arguments to offer beyond its own expression).
 type Check struct {
-	Code    []Instr
-	Fields  []int
-	On      string
-	Message string
+	Code              []Instr
+	Fields            []int
+	On                string
+	Message           string
+	IsFieldConstraint bool
+	Params            map[string]string
 }
 
 // Program is one model's compiled rule set: everything the VM needs to
@@ -96,7 +113,11 @@ type Program struct {
 	// so "is this JSON string a decimal or a real string field" isn't
 	// answerable from the JSON alone.
 	FieldTypes []string
-	Constants  []Value
-	Calls      []CapabilityCall
-	Checks     []Check
+	// FieldIsArray is parallel to Fields: true where that field's
+	// declared type is T[], used by OpFieldLen to decide between
+	// grapheme-counting a string and counting array elements.
+	FieldIsArray []bool
+	Constants    []Value
+	Calls        []CapabilityCall
+	Checks       []Check
 }
