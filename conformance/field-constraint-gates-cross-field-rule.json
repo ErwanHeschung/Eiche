@@ -1,0 +1,10 @@
+{
+  "name": "field-constraint-gates-cross-field-rule",
+  "schema": "model M {\n  salaryMin: int @min(20000)\n  salaryMax: int\n\n  @rule(salaryMax >= salaryMin, \"salary.range\") on salaryMax\n}",
+  "model": "M",
+  "input": { "salaryMin": 5000, "salaryMax": 1000 },
+  "expected": [
+    { "path": "salaryMin", "code": "min" }
+  ],
+  "notes": "salaryMin fails its own @min(20000) constraint. The cross-field salary.range rule (which would also fail numerically: 1000 < 5000) must be suppressed rather than double-reported, per the brief's ordering rule: field constraints run first, and a @rule referencing an already-failed field is skipped."
+}

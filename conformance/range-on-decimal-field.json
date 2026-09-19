@@ -1,0 +1,9 @@
+{
+  "name": "range-on-decimal-field",
+  "schema": "model M {\n  hours: decimal @range(10, 48)\n}",
+  "model": "M",
+  "input": { "hours": "55.5" },
+  "expected": [
+    { "path": "hours", "code": "range", "params": { "min": "10", "max": "48" } }
+  ]
+}

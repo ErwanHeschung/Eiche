@@ -1,0 +1,9 @@
+{
+  "name": "numeric-min-max",
+  "schema": "model M {\n  salary: int @min(20000) @max(200000)\n}",
+  "model": "M",
+  "input": { "salary": 10000 },
+  "expected": [
+    { "path": "salary", "code": "min" }
+  ]
+}

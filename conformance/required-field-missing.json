@@ -1,0 +1,9 @@
+{
+  "name": "required-field-missing",
+  "schema": "model M {\n  title: string\n  nickname?: string\n}",
+  "model": "M",
+  "input": {},
+  "expected": [
+    { "path": "title", "code": "required" }
+  ]
+}

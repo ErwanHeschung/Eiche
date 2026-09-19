@@ -1,0 +1,7 @@
+{
+  "name": "implies-satisfied",
+  "schema": "enum ContractType { CDI, CDD }\nmodel M {\n  contractType: ContractType\n  endDate?: date\n\n  @rule(contractType == CDD implies endDate != null, \"cdd.endDate\") on endDate\n}",
+  "model": "M",
+  "input": { "contractType": "CDD", "endDate": "2027-01-01" },
+  "expected": []
+}

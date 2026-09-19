@@ -1,0 +1,9 @@
+{
+  "name": "max-length-exceeded",
+  "schema": "model M {\n  title: string @minLength(3) @maxLength(10)\n}",
+  "model": "M",
+  "input": { "title": "way too long a title" },
+  "expected": [
+    { "path": "title", "code": "maxLength" }
+  ]
+}

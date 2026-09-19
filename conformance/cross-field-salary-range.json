@@ -1,0 +1,9 @@
+{
+  "name": "cross-field-salary-range",
+  "schema": "model M {\n  salaryMin: int\n  salaryMax: int\n\n  @rule(salaryMax >= salaryMin, \"salary.range\") on salaryMax\n}",
+  "model": "M",
+  "input": { "salaryMin": 80000, "salaryMax": 60000 },
+  "expected": [
+    { "path": "salaryMax", "code": "salary.range" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "min-items",
+  "schema": "model M {\n  skills: string[] @minItems(1)\n}",
+  "model": "M",
+  "input": { "skills": [] },
+  "expected": [
+    { "path": "skills", "code": "minItems" }
+  ]
+}

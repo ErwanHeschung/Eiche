@@ -1,0 +1,7 @@
+{
+  "name": "required-field-present",
+  "schema": "model M {\n  title: string\n  nickname?: string\n}",
+  "model": "M",
+  "input": { "title": "hello" },
+  "expected": []
+}

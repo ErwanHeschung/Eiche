@@ -1,0 +1,8 @@
+{
+  "name": "grapheme-aware-min-length",
+  "schema": "model M {\n  title: string @minLength(3)\n}",
+  "model": "M",
+  "input": { "title": "🇫🇷🇫🇷🇫🇷" },
+  "expected": [],
+  "notes": "3 flag-emoji grapheme clusters, but 6 runes / 12 UTF-16 code units — must pass on grapheme count, not a per-host string length. This is the exact case the brief flags: Java counts UTF-16 code units, Go counts bytes, so @maxLength/@minLength must live in the shared core, never reimplemented per language."
+}

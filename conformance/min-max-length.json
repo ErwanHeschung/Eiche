@@ -1,0 +1,9 @@
+{
+  "name": "min-max-length",
+  "schema": "model M {\n  title: string @minLength(3) @maxLength(10)\n}",
+  "model": "M",
+  "input": { "title": "ab" },
+  "expected": [
+    { "path": "title", "code": "minLength" }
+  ]
+}

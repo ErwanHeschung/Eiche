@@ -1,0 +1,10 @@
+{
+  "name": "implies-null-safety-exemption",
+  "schema": "enum ContractType { CDI, CDD }\nmodel M {\n  contractType: ContractType\n  endDate?: date\n\n  @rule(contractType == CDD implies endDate != null, \"cdd.endDate\") on endDate\n}",
+  "model": "M",
+  "input": { "contractType": "CDD", "endDate": null },
+  "expected": [
+    { "path": "endDate", "code": "cdd.endDate" }
+  ],
+  "notes": "A literal reading of 'skip a rule if any referenced field is null' would skip this rule exactly when endDate is null — i.e. exactly when it's supposed to fire. A field directly compared to null (== null / != null) is exempt from the null-safety skip for that reason; see internal/rules.markFieldUsage."
+}
