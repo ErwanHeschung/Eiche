@@ -337,3 +337,63 @@ func TestFieldConstraintGatesLaterRules(t *testing.T) {
 		t.Fatalf("want only the field-constraint error, got %+v", errs)
 	}
 }
+
+func TestEvalBudgetedAbortsOnExceededBudget(t *testing.T) {
+	prog := salaryRangeProgram() // 3 instructions: PushField, PushField, Gte
+
+	// Generous budget: the check completes normally.
+	errs, err := EvalBudgeted(prog, map[string]any{"salaryMin": 40000, "salaryMax": 60000}, nil, 100)
+	if err != nil {
+		t.Fatalf("Eval with generous budget: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Fatalf("want no errors, got %+v", errs)
+	}
+
+	// Budget too tight for even one check to finish.
+	_, err = EvalBudgeted(prog, map[string]any{"salaryMin": 40000, "salaryMax": 60000}, nil, 2)
+	if err == nil {
+		t.Fatal("want an error: budget of 2 is less than the check's 3 instructions")
+	}
+}
+
+func TestEvalBudgetedSumsAcrossChecks(t *testing.T) {
+	// Two checks of 3 instructions each: a budget of 4 must fail even
+	// though each check individually would fit — the budget bounds the
+	// whole call, not each check in isolation.
+	prog := &Program{
+		Fields:     []string{"a", "b"},
+		FieldTypes: []string{"int", "int"},
+		Checks: []Check{
+			{
+				Code: []Instr{{Op: OpPushField, Operand: 0}, {Op: OpPushField, Operand: 1}, {Op: OpGte}},
+				On:   "a", Message: "c1",
+			},
+			{
+				Code: []Instr{{Op: OpPushField, Operand: 1}, {Op: OpPushField, Operand: 0}, {Op: OpGte}},
+				On:   "b", Message: "c2",
+			},
+		},
+	}
+	_, err := EvalBudgeted(prog, map[string]any{"a": 1, "b": 1}, nil, 4)
+	if err == nil {
+		t.Fatal("want an error: 2 checks of 3 instructions each exceed a budget of 4")
+	}
+
+	_, err = EvalBudgeted(prog, map[string]any{"a": 1, "b": 1}, nil, 6)
+	if err != nil {
+		t.Fatalf("budget of exactly 6 should be enough for 6 total instructions: %v", err)
+	}
+}
+
+func TestEvalUnbudgetedIsEquivalentToZeroBudget(t *testing.T) {
+	prog := salaryRangeProgram()
+	a, errA := Eval(prog, map[string]any{"salaryMin": 90000, "salaryMax": 40000}, nil)
+	b, errB := EvalBudgeted(prog, map[string]any{"salaryMin": 90000, "salaryMax": 40000}, nil, 0)
+	if errA != nil || errB != nil {
+		t.Fatalf("errors: %v / %v", errA, errB)
+	}
+	if len(a) != 1 || len(b) != 1 || a[0].Path != b[0].Path || a[0].Code != b[0].Code {
+		t.Fatalf("Eval and EvalBudgeted(...,0) should behave identically: %+v vs %+v", a, b)
+	}
+}

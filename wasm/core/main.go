@@ -12,11 +12,18 @@
 //	free(ptr)                               releases a buffer from alloc or the result of validate
 //	loadProgram(ptr, len) -> handle          decodes a JSON-encoded bytecode.Program; 0 on failure
 //	unloadProgram(handle)                    releases a loaded Program
-//	validate(handle, jsonPtr, jsonLen) -> ptr
+//	validate(handle, jsonPtr, jsonLen, budget) -> ptr
 //	    always succeeds in the ABI sense (never traps on bad input): the
 //	    result at ptr is a 4-byte little-endian length prefix followed by
 //	    that many bytes of JSON, an encoded Result — {"ok":true,"errors":[...]}
 //	    or {"ok":false,"message":"..."}. The caller must free(ptr) when done.
+//	    budget caps the total bytecode instructions this call may
+//	    dispatch (0 means "use DefaultBudget", not "unlimited" — see
+//	    engine.go). Exceeding it surfaces as an ok:false Result, same as
+//	    any other failure to complete validation. Note what this budget
+//	    does and doesn't cover: it's this interpreter's own loop, not a
+//	    bound on time spent inside a linked capability call — see
+//	    bytecode.EvalBudgeted's doc comment.
 //
 // Capability calls ("::") are not linked into this build yet — every
 // call fails with a clear error surfaced through the normal Result.
@@ -67,8 +74,8 @@ func unloadProgram(handle uint32) {
 }
 
 //go:wasmexport validate
-func validate(handle, jsonPtr, jsonLen uint32) uint32 {
-	r := runValidate(handle, readMemory(jsonPtr, jsonLen))
+func validate(handle, jsonPtr, jsonLen, budget uint32) uint32 {
+	r := runValidate(handle, readMemory(jsonPtr, jsonLen), budget)
 	return writeResult(r)
 }
 

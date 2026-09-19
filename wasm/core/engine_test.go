@@ -45,7 +45,7 @@ func TestFullLifecycle(t *testing.T) {
 	}
 	defer delete(programs, handle)
 
-	r := runValidate(handle, []byte(`{"salaryMin": 40000, "salaryMax": 60000}`))
+	r := runValidate(handle, []byte(`{"salaryMin": 40000, "salaryMax": 60000}`), 0)
 	if !r.OK {
 		t.Fatalf("want ok, got %+v", r)
 	}
@@ -53,7 +53,7 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatalf("valid input: unexpected errors %+v", r.Errors)
 	}
 
-	r = runValidate(handle, []byte(`{"salaryMin": 90000, "salaryMax": 40000}`))
+	r = runValidate(handle, []byte(`{"salaryMin": 90000, "salaryMax": 40000}`), 0)
 	if !r.OK {
 		t.Fatalf("want ok=true (validation ran) with 1 reported error, got %+v", r)
 	}
@@ -80,7 +80,7 @@ func TestDecodeProgramRejectsGarbage(t *testing.T) {
 }
 
 func TestValidateUnknownHandle(t *testing.T) {
-	r := runValidate(999, []byte(`{}`))
+	r := runValidate(999, []byte(`{}`), 0)
 	if r.OK {
 		t.Fatalf("want ok=false for an unknown handle, got %+v", r)
 	}
@@ -109,7 +109,7 @@ func TestValidateUnlinkedCapabilityFailsClearly(t *testing.T) {
 	}
 	defer delete(programs, handle)
 
-	r := runValidate(handle, []byte(`{"contactPhone": "+33612345678"}`))
+	r := runValidate(handle, []byte(`{"contactPhone": "+33612345678"}`), 0)
 	if r.OK {
 		t.Fatalf("want ok=false (unlinked capability), got %+v", r)
 	}
@@ -128,5 +128,38 @@ func TestEncodeResultRoundTrip(t *testing.T) {
 	}
 	if !back.OK || len(back.Errors) != 1 || back.Errors[0].Path != "a" {
 		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+}
+
+func TestRunValidateRespectsExplicitBudget(t *testing.T) {
+	handle := decodeAndStoreProgram(salaryRangeProgramJSON(t)) // 3-instruction check
+	if handle == 0 {
+		t.Fatal("decodeAndStoreProgram failed")
+	}
+	defer delete(programs, handle)
+
+	input := []byte(`{"salaryMin": 40000, "salaryMax": 60000}`)
+
+	r := runValidate(handle, input, 2) // too tight for a 3-instruction check
+	if r.OK {
+		t.Fatalf("want ok=false (budget exceeded), got %+v", r)
+	}
+
+	r = runValidate(handle, input, 100) // plenty
+	if !r.OK {
+		t.Fatalf("want ok=true with a generous budget, got %+v", r)
+	}
+}
+
+func TestRunValidateZeroBudgetUsesDefault(t *testing.T) {
+	handle := decodeAndStoreProgram(salaryRangeProgramJSON(t))
+	if handle == 0 {
+		t.Fatal("decodeAndStoreProgram failed")
+	}
+	defer delete(programs, handle)
+
+	r := runValidate(handle, []byte(`{"salaryMin": 40000, "salaryMax": 60000}`), 0)
+	if !r.OK {
+		t.Fatalf("budget=0 should fall back to DefaultBudget (generous), got %+v", r)
 	}
 }

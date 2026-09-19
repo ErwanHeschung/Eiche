@@ -11,10 +11,10 @@ import (
 )
 
 // ValidationError is the frozen error shape from .context/CLAUDE.md:
-// {path, code, params}. Params is reserved for future interpolation data
-// (e.g. a @min(20000) failure carrying {"min": "20000"}) — M2's compiled
-// @rule checks don't populate it yet, since there's no per-annotation
-// metadata to carry; see the scope note in internal/rules.
+// {path, code, params}. Params carries a field constraint's own literal
+// arguments for message interpolation (e.g. {"min": "3"} for a failed
+// @minLength(3)) — populated for compiled field constraints, nil for
+// explicit @rule checks, which have no structured arguments to offer.
 type ValidationError struct {
 	Path   string
 	Code   string
@@ -43,14 +43,44 @@ func ParseInput(data []byte) (map[string]any, error) {
 	return m, nil
 }
 
-// Eval validates one input object against prog, returning every failed
-// check as a ValidationError. A check whose Fields include a null (or
-// absent) value in input is skipped — see internal/rules for exactly
+// Eval validates one input object against prog with no instruction
+// budget. See EvalBudgeted's doc comment for what a budget does and,
+// importantly, does not protect against.
+func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]ValidationError, error) {
+	return EvalBudgeted(prog, input, invoker, 0)
+}
+
+// EvalBudgeted validates one input object against prog, returning every
+// failed check as a ValidationError. A check whose Fields include a null
+// (or absent) value in input is skipped — see internal/rules for exactly
 // which field references count as "requiring non-null" here, since a
 // field being compared directly against null is deliberately exempt.
-func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]ValidationError, error) {
+//
+// budget, if > 0, caps the total number of bytecode instructions
+// dispatched across every check in this call; exceeding it aborts with
+// an error rather than running unbounded. budget <= 0 means unlimited.
+//
+// What this does and doesn't cover, precisely: it bounds this engine's
+// own interpreter loop — protection against, say, a model compiled with
+// a pathological number of checks. Every instruction in the current ISA
+// terminates in bounded steps (there is no loop/jump construct), so this
+// budget is not what stands between a validate() call and a hang — the
+// real risk the brief names is "a buggy capability that loops forever."
+// A capability call (OpCallCapability) hands control to a *different*,
+// separately-compiled WASM module; once that happens, this interpreter
+// isn't dispatching instructions any more; it's blocked on the import
+// call and has no visibility into what that module is doing. Bounding
+// *that* is necessarily a host-level concern — instrumenting every
+// instruction across the whole linked module graph, not just this one —
+// which is exactly what M-1's spike validated for the JVM (Chicory's
+// ExecutionListener + InterpreterMachine cover core.wasm and any linked
+// capability uniformly, since Chicory interprets both). The browser-side
+// equivalent (a Worker with a wall-clock timeout, since standard
+// WebAssembly has no fuel-metering API) is not built or verified here.
+func EvalBudgeted(prog *Program, input map[string]any, invoker CapabilityInvoker, budget int) ([]ValidationError, error) {
 	var errs []ValidationError
 	failed := map[int]bool{} // field indices with a reported field-constraint error so far
+	spent := 0
 
 	for _, check := range prog.Checks {
 		skip := false
@@ -65,7 +95,7 @@ func Eval(prog *Program, input map[string]any, invoker CapabilityInvoker) ([]Val
 			continue
 		}
 
-		result, err := evalCheck(prog, check, input, invoker)
+		result, err := evalCheck(prog, check, input, invoker, budget, &spent)
 		if err != nil {
 			return nil, fmt.Errorf("check %q: %w", check.Message, err)
 		}
@@ -115,7 +145,7 @@ func fieldLength(raw any, isArray bool) (int64, error) {
 	return int64(uniseg.GraphemeClusterCount(s)), nil
 }
 
-func evalCheck(prog *Program, check Check, input map[string]any, invoker CapabilityInvoker) (bool, error) {
+func evalCheck(prog *Program, check Check, input map[string]any, invoker CapabilityInvoker, budget int, spent *int) (bool, error) {
 	var stack []Value
 	push := func(v Value) { stack = append(stack, v) }
 	pop := func() (Value, error) {
@@ -128,6 +158,13 @@ func evalCheck(prog *Program, check Check, input map[string]any, invoker Capabil
 	}
 
 	for _, instr := range check.Code {
+		if budget > 0 {
+			*spent++
+			if *spent > budget {
+				return false, fmt.Errorf("instruction budget (%d) exceeded", budget)
+			}
+		}
+
 		switch instr.Op {
 		case OpPushConst:
 			push(prog.Constants[instr.Operand])

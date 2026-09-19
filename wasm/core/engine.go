@@ -37,9 +37,20 @@ func decodeAndStoreProgram(data []byte) uint32 {
 	return handle
 }
 
+// DefaultBudget is used when the host passes budget == 0 to validate,
+// rather than treating 0 as "unlimited" — every call gets some bound by
+// default. It's generous relative to any legitimate model (the whole
+// point is catching pathological cases, not tuning normal ones), and
+// only bounds this engine's own interpreter loop — see
+// bytecode.EvalBudgeted's doc comment for exactly what that does and
+// doesn't cover; it is not, by itself, protection against a runaway
+// linked capability.
+const DefaultBudget = 100_000
+
 // runValidate is validate's logic without the memory marshaling: look up
-// the Program by handle and evaluate jsonData against it.
-func runValidate(handle uint32, jsonData []byte) Result {
+// the Program by handle and evaluate jsonData against it under an
+// instruction budget.
+func runValidate(handle uint32, jsonData []byte, budget uint32) Result {
 	prog, ok := programs[handle]
 	if !ok {
 		return resultError(fmt.Sprintf("unknown program handle %d", handle))
@@ -50,7 +61,10 @@ func runValidate(handle uint32, jsonData []byte) Result {
 		return resultError("invalid JSON input: " + err.Error())
 	}
 
-	errs, err := bytecode.Eval(prog, input, unlinkedCapabilities{})
+	if budget == 0 {
+		budget = DefaultBudget
+	}
+	errs, err := bytecode.EvalBudgeted(prog, input, unlinkedCapabilities{}, int(budget))
 	if err != nil {
 		return resultError(err.Error())
 	}
