@@ -40,6 +40,22 @@
 // So engine.go's logic is tested natively (see engine_test.go), and only
 // the memory-marshaling glue here needs the real TinyGo/WASM environment
 // to verify — see spike/m2-wasm-core-smoke.
+//
+// Build with: tinygo build -target=wasm-unknown -gc=conservative
+//
+// The GC mode is a deliberate, verified choice, not TinyGo's bare
+// default. This module is meant to be a long-lived, reused instance —
+// "one per worker in the browser," one per JVM binding — that serves
+// many validate() calls over its lifetime, each of which allocates (JSON
+// decoding, the result buffer). -gc=leaking, the brief's example of what
+// not to use here, never frees: under a synthetic stress test of 10,000
+// validate() calls, a -gc=leaking build's WASM memory grew from 8MB to
+// 67MB in direct proportion to call count; the same test against
+// -gc=conservative stayed flat at 256KB. leaking is legitimately fine
+// for a short-lived, instantiate-once-and-discard call (M-1's spikes
+// used it implicitly and never noticed, because they never made enough
+// calls to matter) — it is not fine here, which is exactly the
+// distinction the brief calls out.
 package main
 
 import (
